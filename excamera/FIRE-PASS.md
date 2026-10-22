@@ -1,7 +1,7 @@
 # ExCamera delta fire-01: volumetric fire and smoke
 
 For the ExCamera owner (E:\ExCamera), via the coordinator. `git apply -p1 fire-01.patch` in E:\ExCamera
-(checked with `git apply --check` against E as of 2026-10-22 12:30 UTC, view_effects.inl sha256
+(checked with `git apply --check` against E as of 2026-10-22 12:20 UTC, view_effects.inl sha256
 09975807…). `apply_fire.py <tree> fire_shader.glsl` re-applies it onto a newer copy, with `fire.inl`
 copied to `src/mod/` first.
 
