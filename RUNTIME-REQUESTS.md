@@ -4,8 +4,8 @@
 #3 `effects.attach_fire` (characters and, in the source, `"weapon:right"`/`"weapon:left"`; API.md's row still
 says weapons are not supported), #6 as `held`/`held_lit` on character rows and `weapon_lit` on hits (no
 `weapon_record`: an instanced torch's `weapon_id` is not its record), #8 Energy casts, #9 `levels.read`,
-#10 `fire_nodes`. Still open: #4 the fire jet, #5 `facing`, #7 `world.nearby` prefixes, and
-`weapon_record` on hits.
+#10 `fire_nodes`; r51: #5 `facing`, #7 `world.nearby` prefixes (Fire looks for its 118 prefixes, the 64
+commonest every scan). Still open: #4 the fire jet, and `weapon_record` on hits.
 
 Static reading of Exanima.exe 0.9.5.2g (addresses are RVAs; sources: KNOWLEDGEBASE.md "What lights a
 fire", "Fire does not hurt by itself", "Particle emitters through CFD20", and API.md 0.21/0.22 and

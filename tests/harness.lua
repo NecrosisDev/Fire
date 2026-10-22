@@ -65,16 +65,24 @@ local function new(opts)
     env.inventory = { snapshot = function() return { weapons = { { item_id = s.held[1] or 0 }, { item_id = s.held[2] or 0 } } } end }
     env.world = {
         level = function() return { id = s.level, loaded = true } end,
-        nearby = function(radius, names)
-            assert(#names <= 16)
+        nearby = function(radius, names, how)
+            s.nearby_calls = (s.nearby_calls or 0) + 1
+            local prefix = opts.prefixes and how and how.prefix
+            if prefix then assert(#names <= 64) else assert(#names <= 16, "more than 16 names") end
             local wanted = {}
             for _, n in ipairs(names) do wanted[n:lower()] = true end
+            local function matches(model)
+                model = model:lower()
+                if not prefix then return wanted[model] end
+                for n in pairs(wanted) do if model:sub(1, #n) == n then return true end end
+                return false
+            end
             local me
             for _, r in ipairs(s.rows) do if r.is_player then me = r.position end end
             local out = {}
             for _, p in ipairs(s.props) do
                 local dx, dz = p.position[1] - me[1], p.position[3] - me[3]
-                if wanted[p.name:lower()] and math.sqrt(dx * dx + dz * dz) <= radius then
+                if matches(p.name) and math.sqrt(dx * dx + dz * dz) <= radius then
                     out[#out + 1] = { name = p.name, position = p.position }
                 end
             end
@@ -313,6 +321,19 @@ case("hands the runtime reports: a lit torch heats props, an NPC's burning sword
     t.player.held, t.player.held_lit = { right = 0x1F }, { right = false }
     t.props = { { name = "sack a", position = { 50, 0, 0 } } }
     t.session() t.run(4) assert(count(t.fires_lit) == 0, "an unlit torch heats nothing")
+end)
+
+case("with name prefixes one call a scan finds the props; an old runtime falls back to exact names", function()
+    local s = new{ prefixes = true } s.held = { 0x1F }
+    s.props = { { name = "sack a", position = { 50, 0, 0 } }, { name = "barrel rusty a1", position = { 60, 0, 0 } } }
+    s.session() s.run(1)
+    local calls = s.nearby_calls
+    assert(calls >= 1 and calls <= 3, "calls " .. calls)
+    s.run(4)
+    assert(count(s.fires_lit) == 1, "the sack, not the iron barrel")
+    local t = new() t.held = { 0x1F }
+    t.props = { { name = "sack a", position = { 50, 0, 0 } } }
+    t.session() t.run(6) assert(count(t.fires_lit) == 1, "exact names on an older runtime")
 end)
 
 case("each burn tick tells Injuries what it dealt, NPC by handle and the player", function()

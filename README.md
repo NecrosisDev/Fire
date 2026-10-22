@@ -3,7 +3,8 @@
 Flames that spread. Wood, cloth and straw props and characters catch fire from anything burning,
 burn for a while with light and damage, spread to what is near them, and burn out.
 
-- **What catches:** 753 placed models from the installed levels, by name: straw (sacks, baskets,
+- **What catches:** 753 placed models from the installed levels, by name (found through 118 name
+  prefixes, one search a scan on runtime 0.28.0-r51): straw (sacks, baskets,
   beds, wicker), cloth (rugs, banners, awnings, cloth bolts), wood (crates, barrels, tables, chairs,
   shelves, carts, planks, barricades) and logs. `tools/make_flammables.py` writes the list.
 - **What lights it:** a held torch or candle (held near a prop; a torch hit sets a foe alight 40% of

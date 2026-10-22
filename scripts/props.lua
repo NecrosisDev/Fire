@@ -11,12 +11,14 @@ local list = require("flammables")
 local props = {}
 
 local CELL = 300            -- spatial grid cell (cm) on the ground plane; no reach is longer
-local BATCH = 16            -- world.nearby takes 16 names a call...
+local BATCH = 16            -- before runtime 0.28.0-r51, world.nearby took 16 exact names a call...
 local CALLS = 4             -- ...and 4 calls a callback
+local PREFIXES = 64         -- since r51 it takes 64 name prefixes; each call walks the whole scene tree
+local RARE_EVERY = 4        -- the prefixes past the first 64 (rare models) are looked for every 4th scan
 local FORGET = 30           -- a prop not seen for this long, and not burning, is dropped
 
 local names, material_of = {}, {}
-for i, row in ipairs(list) do
+for i, row in ipairs(list.names) do
     names[i] = row[1]
     material_of[row[1]:lower()] = row[2]
 end
@@ -24,6 +26,16 @@ end
 local known = {}            -- key -> {key, name, material, position, seen, heat, ends, fire, spent}
 local grid = {}             -- cell -> {key = true}
 local cursor = 1
+local prefix_mode = nil     -- nil until tried; false on a runtime without name prefixes
+local common, rare = {}, {} -- the catalogue's prefixes: the 64 that find most placements, and the rest
+local scans = 0
+for i, prefix in ipairs(list.prefixes) do
+    if i <= PREFIXES then
+        common[#common + 1] = prefix
+    elseif #rare < PREFIXES then
+        rare[#rare + 1] = prefix
+    end
+end
 local lit = {}              -- fire name -> key, for every fire this mod asked for
 local lit_order = {}        -- fire names, oldest first
 local to_light, to_put_out = {}, {}
@@ -90,43 +102,72 @@ function props.can_burn()
     return world and world.light_fire ~= nil and api.has_capability("world.fire")
 end
 
--- Reads the next names of the catalogue around the player (a read-only callback). The whole catalogue
--- takes several calls; with the runtime's prefix match (requested) one call would do.
+-- One world.nearby answer into the catalogue.
+local function take(found, now)
+    for _, object in ipairs(found.objects) do
+        local material = material_of[(object.name or ""):lower()]
+        if material and object.position then
+            local key = key_of(object.name, object.position)
+            local entry = known[key]
+            if not entry then
+                entry = { key = key, name = object.name, material = material, heat = 0,
+                          position = { object.position[1], object.position[2], object.position[3] },
+                          cell = cell_of(object.position[1], object.position[3]) }
+                known[key] = entry
+                grid[entry.cell] = grid[entry.cell] or {}
+                grid[entry.cell][key] = true
+                for _, shape in ipairs(shapes) do
+                    if now < shape.ends and shape.test(entry.position) then
+                        props.ignite(entry, now)
+                        break
+                    end
+                end
+            end
+            entry.seen = now
+        end
+    end
+end
+
+-- Finds the catalogue's props around the player (a read-only callback): with name prefixes (runtime
+-- 0.28.0-r51) one call finds nearly all of them, and a second every few scans the rare ones; before
+-- that, the exact names 64 a callback in turn.
 function props.scan(now)
     if not (world and world.nearby and api.has_capability("world.read")) then
         return
     end
-    for _ = 1, CALLS do
-        local batch = {}
-        for i = 0, BATCH - 1 do
-            batch[#batch + 1] = names[(cursor + i - 1) % #names + 1]
+    if prefix_mode ~= false then
+        scans = scans + 1
+        local lists = { common }
+        if #rare > 0 and scans % RARE_EVERY == 0 then
+            lists[2] = rare
         end
-        cursor = (cursor + BATCH - 1) % #names + 1
-        local ok, found = pcall(world.nearby, config.scan.radius, batch)
-        if not ok or not found then
-            return
-        end
-        for _, object in ipairs(found.objects) do
-            local material = material_of[(object.name or ""):lower()]
-            if material and object.position then
-                local key = key_of(object.name, object.position)
-                local entry = known[key]
-                if not entry then
-                    entry = { key = key, name = object.name, material = material, heat = 0,
-                              position = { object.position[1], object.position[2], object.position[3] },
-                              cell = cell_of(object.position[1], object.position[3]) }
-                    known[key] = entry
-                    grid[entry.cell] = grid[entry.cell] or {}
-                    grid[entry.cell][key] = true
-                    for _, shape in ipairs(shapes) do
-                        if now < shape.ends and shape.test(entry.position) then
-                            props.ignite(entry, now)
-                            break
-                        end
-                    end
+        for _, prefixes in ipairs(lists) do
+            local ok, found = pcall(world.nearby, config.scan.radius, prefixes, { prefix = true })
+            if not ok then
+                if prefix_mode == nil then
+                    prefix_mode = false   -- an older runtime refuses more than 16 names: exact names from now on
                 end
-                entry.seen = now
+                break
             end
+            prefix_mode = true
+            if not found then
+                return
+            end
+            take(found, now)
+        end
+    end
+    if prefix_mode == false then
+        for _ = 1, CALLS do
+            local batch = {}
+            for i = 0, BATCH - 1 do
+                batch[#batch + 1] = names[(cursor + i - 1) % #names + 1]
+            end
+            cursor = (cursor + BATCH - 1) % #names + 1
+            local ok, found = pcall(world.nearby, config.scan.radius, batch)
+            if not ok or not found then
+                return
+            end
+            take(found, now)
         end
     end
     for key, entry in pairs(known) do
@@ -265,7 +306,7 @@ end
 -- them), so only the bookkeeping is dropped.
 function props.reset()
     known, grid, lit, lit_order, to_light, to_put_out, shapes = {}, {}, {}, {}, {}, {}, {}
-    cursor = 1
+    cursor, scans = 1, 0
 end
 
 function props.count()
