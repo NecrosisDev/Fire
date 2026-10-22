@@ -16,6 +16,7 @@ do without.
 | 6 | held-item record and lit flag (hits, inventory, NPC rows) | NPC torches; candles; unlit torches | only hits whose `weapon_id` is the torch record itself count |
 | 7 | `world.nearby` prefix match, or more names a call | one scan instead of 12 | the 753-name catalogue is read 64 names a callback |
 | 8 | Energy casts the game does not know go to `power.cast` | Fire Breath and Flaming Weapon can be cast at all | the game plays its fail sound |
+| 9 | `levels.read(member, package)` | Energy School builds its page from the installed one (ships no game data) | the Energy page stays as installed: the powers cannot be learnt |
 
 ## 1. `world.light_fire(name, {position, size})`, `world.put_out_fire(name)`
 
@@ -30,9 +31,12 @@ do without.
   the addon has 24 lit. `name` (1..31 bytes) is the addon's handle on it; reusing a live name is
   refused. `world.put_out_fire(name)` removes it with the 0.22 extinction path.
   **These fires must not be saved:** `F2ED0` rebuilds every `0x3DD0E002` body at load, so a mod fire
-  saved while burning would burn forever after a reload. Either keep them out of the level serializer
-  (`1CD320` saves only nodes with a registered tag) or put them out before a save; at a level change
-  they simply go with the scene and the names are forgotten.
+  saved while burning would burn forever after a reload. The tag is the save key: `F2A70` writes it
+  to the fire controller (`*(fire + 0x160) + 0x158` = `0x3DD0E002`), and the level serializer
+  `1CD320` saves only nodes whose controller tag is registered. So zero that word right after the
+  build (static reading of `1000f2a70.c`; what else reads the tag besides `1C9820`'s load-time test
+  and the save path was not traced). At a level change the fires go with the scene and the names
+  are forgotten.
 - **Fire:** lights one per burning prop (size by material: straw 0.7, cloth 0.6, wood 0.9, logs 1.1)
   and puts it out when the prop has burnt (20 to 90 s).
 
@@ -53,7 +57,18 @@ do without.
 - **Game:** `149740` links a fire to a node's child with `A1730`; `CFD20(scene, spec, material)`
   builds an unsaved particle node that a mod can parent (`50170`) and remove (`50A60(node, 1)`).
   The fire variants' own builders (`F15A0`/`F1760`/`F1920`) give the flame look and light.
-- **Ask:** a fire look (the game's small fire, or a `_FirePrt01` emitter with a light) that follows
+- **How the builder hands back a fire (static, `1000f2a70.c`):** `F2A70(&position, size, scene)`
+  returns the fire node unattached: for small sizes it builds it from the fire preset at `.data 2B5A70`
+  (`F1920`), stores the position at node `+94..+9C`, tags the controller (`+160`) `+158` and makes a
+  light node (class `2FCF40`, `51880`) that it parents to the fire with `50170(fire, light)`; larger
+  sizes go to `F2510`/`F20C0`/`F1C40`. The caller attaches and registers it, as `149740` does
+  (`50170` under the target node, or `A1730` to link it to a child). So an attached flame is: build
+  with a local offset as the position, clear the tag (request 1), `50170(part or weapon node, fire)`,
+  propagate the pose (`EXP_propagate_node_pose`), `5A420(scene, &fire, 0)`; remove with
+  `50A60(fire, 1)`. Each fire also carries the preset's looping sound (`FireS02`) and light (strength 8,
+  range 1500, `.data 2B5A70 +74/+78`), which suits a burning body; for a blade, size 0.25 and
+  dimming the light node `+220` would keep it from lighting the room like a hearth.
+- **Ask:** a fire look (the game's small fire, built as above) that follows
   `target` until removed or the level ends: `target` is `"player"`, a row with a `handle`
   (`characters.read` row or `character.hit` event) or `"weapon:right"`/`"weapon:left"` (the player's
   held weapon body: the same node `character_hits` reports as `weapon`); `size` 0.1..1 scales it.
@@ -105,3 +120,21 @@ do without.
   "energy"`. Leave 0x401 and 0x2040B to the game. Extending `powers.teach` to these ids is not needed:
   the player learns them on the Energy page like Shock.
 - **Energy School:** Fire Breath `0x402` and Flaming Weapon `0x403`.
+
+## 9. `levels.read(member, package)`
+
+- **Why:** the project rule is never to ship game files. The Energy page (`pwr_energy.pwr`, Shock
+  only) and its icon sheet (`thmnrgico1.rfi`, one 512 px cell) ship with the game, so Energy School
+  must add its two nodes and cells to the installed ones at load. It ships only its own nodes
+  (`scripts/page.lua`) and a sheet with its own cells (`assets/energy-cells.rfi`); `scripts/merge.lua`
+  does the merge on a worker and `levels.serve` serves the result. The offline test checks the merge
+  byte for byte against the same merge done with the ExaniMate library (2950-byte tree, 1,249,180-byte
+  sheet; 0.6 s of CPU in stock Lua).
+- **Ask:** with `levels.serve`, from callbacks: the bytes of an uncompressed (type 0) `member` of the
+  installed `package` (such as `"Resource.rpk"`), as the game's own archive holds them, ignoring any
+  addon's serve and EMTK's replacements; nil and a reason when it is missing or compressed; 4 MiB at
+  most. Reading only, the same members `levels.serve` can replace.
+- **Open question for you:** when the game first reads `pwr_energy.pwr` and `thmnrgico1.rfi`. Energy
+  School serves them from its first `menu` or `session` callback; if the game reads them earlier (at
+  startup) and keeps them, the serve has to be in place before that, and `levels.read` would be needed
+  while loading.

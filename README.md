@@ -16,6 +16,9 @@ burn for a while with light and damage, spread to what is near them, and burn ou
   the game's damage applier, never knocking them down by itself. On the ground they roll it out three
   times faster. The player takes three quarters; the dead (Undead, Corpse roles) take half again.
   Fire jumps between people standing close (15% a second).
+- **Burn marks:** each burn tick tells the Injuries mod (`com.necrosis.injuries`) what it dealt
+  (`injuries.burn`), and Injuries bakes reddening, blisters and char into the skin and soot onto
+  clothes. Fire also sets the marks `fire.burning` and `fire.scorch` (`excamera/BURN-MARKS.md`).
 - **No menu.** It is always on; tuning lives in `scripts/config.lua`.
 
 ## For other mods

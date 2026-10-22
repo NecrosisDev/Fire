@@ -44,6 +44,12 @@ return {
     -- they never heat props, or every crate beside a hearth would catch at level load.
     native_reach = 60,
 
+    injuries = "com.necrosis.injuries",   -- told each burn tick's damage ("injuries.burn"): it bakes the burn
+
+    -- Marks other mods may read: scorch grows `rate` a second of burning (x strength), up to 255,
+    -- and is sent whenever it has grown by `step`.
+    marks = { burning = "fire.burning", scorch = "fire.scorch", rate = 10, step = 8 },
+
     -- Until the runtime can put flames on a character, the nearest burning ones glow.
     light = { color = { 1.6, 0.75, 0.3 }, range = 500, intensity = 1.6, up = 20, glow = 9 },
     sounds = { ignite = { "firesizzlea01", "firesizzlea02", "firesizzlea03", "firesizzlea04" }, volume = 0.2, hear = 1500 },

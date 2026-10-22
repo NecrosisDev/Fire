@@ -349,6 +349,9 @@ local function tick()
     if people.has_fx() then
         timers.after(0, people.flush_fx)
     end
+    if people.marks_due() then
+        timers.after(0, people.flush_marks)
+    end
     timers.after(0, function() people.flush_glow(here) end)
     if heard(caught, here) then
         sound_due = true

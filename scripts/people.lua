@@ -3,7 +3,9 @@
 --
 -- Damage goes through the game's own damage applier (character:damage, player.damage), never a
 -- health write. The flames on the body need the runtime's effects.attach_fire; until then the nearest
--- burning characters glow with a placed light.
+-- burning characters glow with a placed light. Burns leave marks other mods draw (characters.set_mark):
+-- "fire.burning" (1 while alight) and "fire.scorch" (0..255, how burnt; it never fades in a level), for
+-- the ExCamera skin bake to char skin and cloth (excamera/BURN-MARKS.md).
 local config = require("config")
 
 local people = {}
@@ -16,6 +18,8 @@ local glowing = {}          -- light name -> true
 local undead_roles = { Undead = true, Corpse = true }
 local serial = 0
 local warned = {}
+local marks = {}            -- mark target ("player" or a record id) -> {burning, scorch, sent_burning, sent_scorch}
+local MARK_TARGETS = 16     -- the runtime keeps 32 marks an addon: two names each
 
 local function warn_once(what, text)
     if not warned[what] then
@@ -27,6 +31,33 @@ end
 local function distance(a, b)
     local dx, dy, dz = a[1] - b[1], a[2] - b[2], a[3] - b[3]
     return math.sqrt(dx * dx + dy * dy + dz * dz)
+end
+
+local function mark_target(state)
+    if state.is_player then
+        return "player"
+    end
+    return (state.record_id or 0) ~= 0 and state.record_id or nil
+end
+
+local function mark_of(state)
+    local target = mark_target(state)
+    if not target then
+        return nil
+    end
+    local mark = marks[target]
+    if not mark then
+        local n = 0
+        for _ in pairs(marks) do
+            n = n + 1
+        end
+        if n >= MARK_TARGETS then
+            return nil
+        end
+        mark = { burning = 0, scorch = 0, sent_burning = 0, sent_scorch = 0 }
+        marks[target] = mark
+    end
+    return mark
 end
 
 local function chance(per_second, dt)
@@ -69,6 +100,10 @@ function people.ignite(who, seconds, strength)
                         left = seconds, strength = strength or 1, position = who.position, missing = 0,
                         fx = "b" .. serial }
     fx_on[#fx_on + 1] = burning[handle]
+    local mark = mark_of(burning[handle])
+    if mark then
+        mark.burning = 1
+    end
     return true
 end
 
@@ -91,6 +126,10 @@ local function put_out(handle)
     burning[handle] = nil
     if state then
         fx_off[#fx_off + 1] = state.fx
+        local mark = mark_of(state)
+        if mark then
+            mark.burning = 0
+        end
     end
 end
 
@@ -123,6 +162,10 @@ function people.step(now, dt, rows, fires)
             else
                 local share = (state.is_player and person.player or 1) * (state.undead and person.undead or 1) * state.strength
                 owe(handle, person.health * dt * share, person.balance * dt * share)
+                local mark = mark_of(state)
+                if mark then
+                    mark.scorch = math.min(255, mark.scorch + config.marks.rate * dt * state.strength)
+                end
             end
         end
     end
@@ -197,6 +240,14 @@ function people.owes()
     return next(pending) ~= nil
 end
 
+-- The Injuries mod bakes the burn into the skin and soot into clothes from what each tick dealt.
+local function tell_injuries(row, health)
+    if addons and addons.send and health > 0 then
+        addons.send(config.injuries, "injuries.burn", { target = row.is_player and "player" or { handle = row.handle },
+                                                        amount = health })
+    end
+end
+
 -- Pays the damage owed, in its own callback (the game's damage applier is a staged call: 4 a callback).
 -- Returns true when more is owed than this callback could pay.
 function people.flush_damage()
@@ -214,12 +265,14 @@ function people.flush_damage()
                 if player and player.damage and api.has_capability("player.damage") then
                     pcall(player.damage, balance, health, false)
                     calls = calls + 1
+                    tell_injuries(row, health)
                 else
                     warn_once("player", "the player cannot be burnt: this runtime has no player.damage")
                 end
             elseif row.damage and not row.dead then
                 pcall(row.damage, row, { health = health, balance = balance, can_fall = false })
                 calls = calls + 1
+                tell_injuries(row, health)
             end
         end
     end
@@ -298,12 +351,42 @@ function people.flush_glow(here)
     glowing = used
 end
 
+-- Marks that changed (alight or out, or scorch grown by a step), in their own callback.
+function people.marks_due()
+    for _, mark in pairs(marks) do
+        if mark.burning ~= mark.sent_burning or math.floor(mark.scorch) >= mark.sent_scorch + config.marks.step
+            or (mark.scorch >= 255 and mark.sent_scorch < 255) then
+            return true
+        end
+    end
+    return false
+end
+
+function people.flush_marks()
+    if not (characters and characters.set_mark and api.has_capability("characters.marks")) then
+        return
+    end
+    for target, mark in pairs(marks) do
+        if mark.burning ~= mark.sent_burning then
+            if pcall(characters.set_mark, target, config.marks.burning, mark.burning) then
+                mark.sent_burning = mark.burning
+            end
+        end
+        local scorch = math.floor(mark.scorch)
+        if scorch >= mark.sent_scorch + config.marks.step or (scorch >= 255 and mark.sent_scorch < 255) then
+            if pcall(characters.set_mark, target, config.marks.scorch, scorch) then
+                mark.sent_scorch = scorch
+            end
+        end
+    end
+end
+
 function people.has_fx()
     return #fx_on > 0 or #fx_off > 0
 end
 
 function people.reset()
-    burning, pending, fx_on, fx_off = {}, {}, {}, {}
+    burning, pending, fx_on, fx_off, marks = {}, {}, {}, {}, {}
     if next(glowing) and lights and lights.remove then
         for name in pairs(glowing) do
             pcall(lights.remove, name)

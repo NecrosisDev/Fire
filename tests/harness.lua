@@ -12,7 +12,7 @@ local function new(opts)
     local caps = { ["events.lifecycle"] = true, timers = true, ["world.read"] = true, ["characters.read"] = true,
                    ["inventory.read"] = true, ["events.combat"] = true, ["characters.damage"] = true,
                    ["player.damage"] = true, ["world.lights"] = true, ["ui.sound"] = true,
-                   ["world.fire"] = not opts.no_fire, ["effects.fire"] = not opts.no_fx }
+                   ["characters.marks"] = true, ["world.fire"] = not opts.no_fire, ["effects.fire"] = not opts.no_fx }
     local mathx = {}
     for k, v in pairs(math) do mathx[k] = v end
     mathx.random = function(n) if n then return 1 end return s.random end
@@ -23,7 +23,13 @@ local function new(opts)
                 warn = function(m) s.logs[#s.logs + 1] = "warn: " .. m end }
     env.api = { has_capability = function(name) return caps[name] == true end }
     env.events = { on = function(name, fn) s.handlers[name] = fn end }
-    env.addons = { on = function(topic, fn) s.topics[topic] = fn return true end }
+    s.injuries = {}
+    env.addons = { on = function(topic, fn) s.topics[topic] = fn return true end,
+                   send = function(target, topic, value)
+                       assert(target == "com.necrosis.injuries" and topic == "injuries.burn" and value.amount > 0)
+                       local key = value.target == "player" and "player" or value.target.handle
+                       s.injuries[key] = (s.injuries[key] or 0) + value.amount
+                       return true end }
     env.timers = {
         every = function(sec, fn) s.timers[#s.timers + 1] = { sec = sec, fn = fn, due = s.now + sec } return #s.timers end,
         after = function(sec, fn) s.afters[#s.afters + 1] = fn return 1000 + #s.afters end,
@@ -47,6 +53,13 @@ local function new(opts)
         end
         return { characters = out }
     end }
+    s.marks = {}
+    env.characters.set_mark = function(target, name, value)
+        assert((target == "player" or math.type(target) == "integer") and name:match("^fire%.") and math.type(value) == "integer"
+               and value >= 0 and value <= 255)
+        s.marks[tostring(target) .. ":" .. name] = value ~= 0 and value or nil
+        return true
+    end
     env.player = { damage = function(b, h, fall) staged() s.player_damage[#s.player_damage + 1] = h return true end }
     env.inventory = { snapshot = function() return { weapons = { { item_id = s.held[1] or 0 }, { item_id = s.held[2] or 0 } } } end }
     env.world = {
@@ -265,6 +278,27 @@ case("bad messages are refused with a warning, not an error", function()
     s.send("fire.ignite", { cone = { origin = "here" } }) s.send("fire.weapon", { seconds = -1 }) s.send("fire.ignite", 3)
     local warns = 0 for _, l in ipairs(s.logs) do if l:find("^warn") then warns = warns + 1 end end
     assert(warns == 3)
+end)
+
+case("burns leave marks: alight while burning, scorch that stays after", function()
+    local s = new()
+    s.rows[2] = { handle = 7, record_id = 70, position = { 100, 0, 0 } }
+    s.session() s.send("fire.ignite", { handle = 7, seconds = 6 }) s.run(3)
+    assert(s.marks["70:fire.burning"] == 1 and s.marks["70:fire.scorch"] >= 16)
+    s.run(6)
+    assert(s.marks["70:fire.burning"] == nil and s.marks["70:fire.scorch"] >= 48 and s.marks["70:fire.scorch"] <= 64)
+    s.send("fire.ignite", { target = "player", seconds = 2 }) s.run(1)
+    assert(s.marks["player:fire.burning"] == 1)
+end)
+
+case("each burn tick tells Injuries what it dealt, NPC by handle and the player", function()
+    local s = new()
+    s.rows[2] = { handle = 7, position = { 100, 0, 0 } }
+    s.session() s.send("fire.ignite", { handle = 7, seconds = 4, health = 0.05 }) s.send("fire.ignite", { target = "player", seconds = 2 })
+    s.run(6)
+    assert(math.abs(s.injuries[7] - s.damage[7]) < 1e-9 and s.injuries[7] > 0.1)
+    local total = 0 for _, h in ipairs(s.player_damage) do total = total + h end
+    assert(math.abs(s.injuries.player - total) < 1e-9)
 end)
 
 print(passed .. " passed")

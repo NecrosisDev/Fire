@@ -9,11 +9,12 @@ entry = "scripts/main.lua"
 requires = ["events.lifecycle", "timers"]
 # world.read finds flammable props and the game's own fires; characters.read who stands where;
 # inventory.read the player's held torch; events.combat torch and flaming-weapon hits; characters.damage
-# and player.damage the burns; world.lights the glow on burning people; ui.sound the catch.
+# and player.damage the burns; world.lights the glow on burning people; ui.sound the catch;
+# characters.marks the burn marks ExCamera draws (excamera/BURN-MARKS.md).
 # world.fire (props burn with the game's fire) and effects.fire (flames on bodies) are requested
 # (RUNTIME-REQUESTS.md); an unknown optional name is ignored until a runtime has it.
 optional = ["world.read", "characters.read", "inventory.read", "events.combat", "characters.damage",
-            "player.damage", "world.lights", "ui.sound", "world.fire", "effects.fire"]
+            "player.damage", "world.lights", "ui.sound", "characters.marks", "world.fire", "effects.fire"]
 
 [script.modules]
 config = "scripts/config.lua"
