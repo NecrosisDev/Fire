@@ -291,6 +291,12 @@ case("burns leave marks: alight while burning, scorch that stays after", functio
     assert(s.marks["player:fire.burning"] == 1)
 end)
 
+case("a flaming weapon marks the player for ExCamera's blade flames, and clears it when it ends", function()
+    local s = new() s.session() s.send("fire.weapon", { seconds = 3 }) s.run(1)
+    assert(s.marks["player:fire.blade"] == 1)
+    s.run(3) assert(s.marks["player:fire.blade"] == nil)
+end)
+
 case("each burn tick tells Injuries what it dealt, NPC by handle and the player", function()
     local s = new()
     s.rows[2] = { handle = 7, position = { 100, 0, 0 } }

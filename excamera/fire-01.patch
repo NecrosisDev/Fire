@@ -1,0 +1,559 @@
+diff --git a/src/mod/view_effects.inl b/src/mod/view_effects.inl
+index bd574c4..ac16aea 100644
+--- a/src/mod/view_effects.inl
++++ b/src/mod/view_effects.inl
+@@ -1329,6 +1329,113 @@ void main() {
+ }
+ )glsl";
+ 
++// Fire and smoke (fire.inl), their own pass before the finishing pass: drawn only inside the box that
++// holds every volume. Each volume is marched front to back between the camera ray's entry into its
++// bounding sphere and the scene's depth, so flames end where they meet a wall, the floor or a body.
++// Flames emit (a black-body ramp from deep red at the edge to near white at the hot core) and smoke
++// absorbs and scatters a little of the flames' light. The noise is a frame fixed to the world, rising
++// over time, so the fire does not swim as the camera turns.
++static const char* const fireShader = R"glsl(
++uniform vec4 fireA[12];   // base centre, view space (cm); w: radius at the base (cm)
++uniform vec4 fireB[12];   // base to the flame's top (cm); w: kind (0 fire, 1 a burning body, 2 a blade)
++uniform vec4 fireC[12];   // intensity 0..1, seed, smoke 0..1, unused
++uniform float fireCount;
++uniform vec4 fireRect;    // screen box (uv min xy, max zw); outside it nothing to do
++uniform vec4 fireLook;    // x seconds, y march steps, z 1 with smoke, w unused
++uniform vec4 fireRight;   // world +x in view space (xyz)
++uniform sampler3D fireNoise; // tiling smooth noise, 16 units a tile, four channels
++
++float fireFbm(vec3 p) {
++    vec4 a = texture3D(fireNoise, p * 0.0625);
++    vec4 b = texture3D(fireNoise, p * 0.137 + 0.31);
++    return a.r * 0.5 + b.g * 0.3 + a.b * 0.2;
++}
++
++// Deep red, orange, yellow, then white-hot: linear light, brighter than 1 at the core for the bloom.
++vec3 fireRamp(float t) {
++    t = clamp(t, 0.0, 1.4);
++    return vec3(1.6, 0.42, 0.08) * smoothstep(0.02, 0.4, t) + vec3(0.0, 0.62, 0.16) * smoothstep(0.35, 0.8, t) +
++           vec3(0.0, 0.18, 0.55) * smoothstep(0.8, 1.3, t);
++}
++
++void main() {
++    vec4 scene = texture2D(sceneTex, uv);
++    if (uv.x < fireRect.x || uv.y < fireRect.y || uv.x > fireRect.z || uv.y > fireRect.w) {
++        gl_FragColor = scene;
++        return;
++    }
++    float raw = texture2D(depthTex, uv).r;
++    vec3 surface = viewPosition(uv, raw);
++    vec3 ray = normalize(vec3((uv * 2.0 - 1.0 + projection.zw) / projection.xy, -1.0));
++    float sceneT = raw >= skyDepth ? 1e6 : length(surface);
++    vec3 light = vec3(0.0);
++    float through = 1.0;   // how much of what lies behind still shows
++    float jitter = noise();
++    float time = fireLook.x;
++    for (int i = 0; i < 12; ++i) {
++        if (float(i) >= fireCount || through < 0.02) break;
++        vec4 A = fireA[i], B = fireB[i], C = fireC[i];
++        float height = length(B.xyz);
++        if (height < 1.0) continue;
++        vec3 axis = B.xyz / height;
++        float kind = B.w, radius = A.w;
++        float plume = kind < 0.5 && fireLook.z > 0.5 ? 3.2 : 1.0 + 0.6 * C.z * fireLook.z; // smoke rises above the flames
++        float top = height * plume;
++        // Bounding sphere of flames and plume.
++        vec3 centre = A.xyz + axis * top * 0.5;
++        float bound = top * 0.5 + radius * (1.0 + 0.9 * (plume - 1.0));
++        float b = dot(ray, centre);
++        float disc = b * b - dot(centre, centre) + bound * bound;
++        if (disc <= 0.0) continue;
++        float s = sqrt(disc);
++        float t0 = max(b - s, 0.0), t1 = min(b + s, sceneT);
++        if (t1 <= t0) continue;
++        // Fewer steps for a far, small volume; the step count never drops below 4.
++        float steps = clamp(fireLook.y * clamp(bound * 4.0 / max(t0, 1.0), 0.35, 1.0), 4.0, fireLook.y);
++        float dt = (t1 - t0) / steps;
++        vec3 side = normalize(fireRight.xyz - axis * dot(fireRight.xyz, axis));
++        vec3 depthAxis = cross(axis, side);
++        float scale = 1.0 / max(radius * 0.55, 2.0);   // noise features about half the base radius across
++        for (int k = 0; k < 24; ++k) {
++            if (float(k) >= steps || through < 0.02) break;
++            vec3 p = ray * (t0 + (float(k) + jitter) * dt) - A.xyz;
++            float h = dot(p, axis) / height;          // 0 at the base, 1 at the flame's top
++            vec3 across = p - axis * (h * height);
++            float r = length(across) / radius;          // 0 on the axis, 1 at the base's edge
++            vec3 q = vec3(dot(across, side), h * height, dot(across, depthAxis)) * scale + C.y;
++            // Flames: a teardrop narrowing to the top, licked by noise rising faster than the smoke.
++            float lick = fireFbm(q - vec3(0.0, time * 2.6, 0.0));
++            float width = pow(clamp(1.0 - h, 0.0, 1.0), kind > 1.5 ? 0.25 : 0.6) * (0.75 + 0.5 * lick);
++            float flame = h > -0.05 && h < 1.1 ? smoothstep(0.0, 0.35, width - r) * (1.0 - smoothstep(0.7, 1.08, h + 0.3 * lick)) : 0.0;
++            float density = flame * (0.6 + 0.8 * lick);
++            if (density > 0.001) {
++                float heat = density * (1.15 - h * 0.6) * (1.0 - r * 0.45);
++                light += through * fireRamp(heat * 1.25) * density * C.x * dt * 0.045;
++                through *= exp(-density * dt * 0.012);
++            }
++            // Smoke: above the flames, widening as it rises, drifting and thinning out.
++            if (fireLook.z > 0.5 && C.z > 0.0 && h > 0.55) {
++                float rise = h - 0.55;
++                float wide = r / (0.55 + 0.45 * rise);
++                float puff = fireFbm(q * 0.55 - vec3(0.4 * sin(time * 0.3 + C.y), time * 1.1, 0.0));
++                float smoke = smoothstep(0.35, 0.75, puff + 0.45 - wide) * smoothstep(0.0, 0.5, rise) *
++                              (1.0 - smoothstep(plume * 0.55, plume * 0.95, h)) * C.z;
++                if (smoke > 0.001) {
++                    // Lit from below by the flames, dark grey higher up.
++                    vec3 tint = mix(vec3(0.5, 0.2, 0.06) * C.x, vec3(0.05, 0.048, 0.045), smoothstep(0.0, 0.8, rise));
++                    float absorb = smoke * dt * 0.012;
++                    light += through * tint * absorb;
++                    through *= exp(-absorb * 1.6);
++                }
++            }
++        }
++    }
++    vec3 base = encoded > 0.5 ? pow(scene.rgb, vec3(2.2)) : scene.rgb;
++    vec3 c = base * through + light;
++    gl_FragColor = vec4(encoded > 0.5 ? pow(c, vec3(1.0 / 2.2)) : c, scene.a);
++}
++)glsl";
++
+ // Uniform names shared by all programs; a program that does not use one
+ // gets location -1, which glUniform ignores. Never treat -1 as a failure:
+ // drivers strip uniforms a shader does not read.
+@@ -1338,7 +1445,8 @@ enum ViewUniform : unsigned {
+     uAoHalf, uSsrHalf, uHalfSize, uAoStrength, uSsrOn, uBounceOn, uBounceStrength, uSharpen, uPreviousDepth, uSurfacesOn, uSsrSize, uDofOn, uDistanceHalf, uDistanceHalfOn,
+     uFrameOffset, uCurrent, uHistory, uToPrevious, uPreviousProjection, uHistoryWeight, uDofHalf, uCells, uExposure,
+     uSilhouette, uSilhouetteOn, uHeldDetail, uHeldNoise, uHeldData, uLevelDetail, uLevelRow0, uLevelRow1, uLevelRow2, uLevelPeople,
+-    uWoundA, uWoundB, uWoundC, uWoundCount, uWoundRect, uDripA, uDripCount, viewUniformCount
++    uWoundA, uWoundB, uWoundC, uWoundCount, uWoundRect, uDripA, uDripCount,
++    uFireA, uFireB, uFireC, uFireCount, uFireRect, uFireLook, uFireRight, uFireNoise, viewUniformCount
+ };
+ static const char* const viewUniformNames[viewUniformCount] = {
+     "sceneTex", "depthTex", "texel", "projection", "depthLinear", "pixelScale", "encoded",
+@@ -1346,11 +1454,12 @@ static const char* const viewUniformNames[viewUniformCount] = {
+     "aoHalf", "ssrHalf", "halfSize", "aoStrength", "ssrOn", "bounceOn", "bounceStrength", "sharpen", "previousDepth", "surfacesOn", "ssrSize", "dofOn", "distanceHalf", "distanceHalfOn",
+     "frameOffset", "current", "history", "toPrevious", "previousProjection", "historyWeight", "dofHalf", "cells", "exposure",
+     "silhouette", "silhouetteOn", "heldDetail", "heldNoise", "heldData", "levelDetail", "levelRow0", "levelRow1", "levelRow2", "levelPeople",
+-    "woundA", "woundB", "woundC", "woundCount", "woundRect", "dripA", "dripCount"};
++    "woundA", "woundB", "woundC", "woundCount", "woundRect", "dripA", "dripCount",
++    "fireA", "fireB", "fireC", "fireCount", "fireRect", "fireLook", "fireRight", "fireNoise"};
+ struct ViewProgramUniforms { GLint at[viewUniformCount]; };
+ enum ViewProgram : unsigned {
+     programAo, programSsr, programDof, programFinish, programComposite, programResolve, programDofComposite,
+-    programMeter, programDistance, programWounds, programCount
++    programMeter, programDistance, programWounds, programFire, programCount
+ };
+ static ViewProgramUniforms viewUniforms[8][programCount]; // [cue context][ViewProgram]; cueLock
+ 
+@@ -1360,7 +1469,7 @@ enum ViewEffectUnavailable : unsigned {
+     viewHookMissing = 1, viewApiMissing = 2, viewTargetsFailed = 4, viewAoFailed = 8, viewSsrFailed = 16,
+     viewDofFailed = 32, viewFaulted = 64, viewFinishFailed = 128, viewCompositeFailed = 256, viewResolveFailed = 512,
+     viewDofCompositeFailed = 1024, viewMeterFailed = 2048,
+-    viewDistanceFailed = 4096, viewWoundsFailed = 8192
++    viewDistanceFailed = 4096, viewWoundsFailed = 8192, viewFireFailed = 16384
+ };
+ static std::atomic<unsigned> viewEffectsUnavailable{0};
+ static char viewEffectsReason[256];
+@@ -2124,9 +2233,10 @@ struct ViewRequest {
+     unsigned peopleCount = 0;
+     HeldPose held[heldSlotLimit]{};
+     WoundUniforms wounds;                // wounds in view, already in this view's space
++    FireUniforms fires;                  // fire and smoke volumes in view (fire.inl), this view's space
+     bool finish() const {
+         return smooth > 0.f || sharpen > 0.f || visor > 0.f || ghost || detail > 0.f || level > 0.f || hurt > 0.f || winded > 0.f ||
+-               wounds.any();
++               wounds.any() || fires.any();
+     }
+     bool any() const { return ao > 0.f || dof > 0.f || ssr > 0.f || adapt || finish(); }
+ };
+@@ -2384,7 +2494,7 @@ static void drawViewEffectsOwned(uintptr_t view, const ViewRequest& request) {
+         owner->viewTargetsFailed = false;
+         owner->aoAttempted = owner->ssrAttempted = owner->dofAttempted = owner->finishAttempted =
+             owner->compositeAttempted = owner->resolveAttempted = owner->dofCompositeAttempted =
+-            owner->meterAttempted = owner->distanceAttempted = owner->woundAttempted = false;
++            owner->meterAttempted = owner->distanceAttempted = owner->woundAttempted = owner->fireAttempted = false;
+     }
+     // Multi-output routing is checked on audit frames (see above).
+     if (audit) owner->viewOutputsReady = cueOutputReady(g);
+@@ -2423,7 +2533,9 @@ static void drawViewEffectsOwned(uintptr_t view, const ViewRequest& request) {
+         {float(aoMode || ssrMode), &r.distanceProgram, &owner->distanceAttempted, nullptr, distanceShader,
+          viewDistanceFailed, "half-resolution distances"},
+         {float(finishMode && (request.wounds.count || request.wounds.drips)), &r.woundProgram, &owner->woundAttempted, nullptr, woundShader,
+-         viewWoundsFailed, "wound marks"}};
++         viewWoundsFailed, "wound marks"},
++        {float(finishMode && request.fires.count), &r.fireProgram, &owner->fireAttempted, nullptr, fireShader,
++         viewFireFailed, "fire and smoke"}};
+     for (unsigned i = 0; i < programCount; ++i) {
+         if (!effects[i].mode || *effects[i].attempted) continue;
+         *effects[i].attempted = true;
+@@ -2935,6 +3047,69 @@ static void drawViewEffectsOwned(uintptr_t view, const ViewRequest& request) {
+                 g.bindVertexArray(r.viewVao);
+             }
+         }
++        // Fire and smoke (fire.inl) next, on the same image, only inside the box that holds every volume.
++        if (finishMode && request.fires.count && r.fireProgram && g.uniform4fv && projection.worldUpValid &&
++            (source == r.viewColor || source == r.chainTex) && woundPassReady(g, r) && prepareHeldNoise(g, r)) {
++            const FireUniforms& fires = request.fires;
++            // Each volume's bounding sphere, as the shader builds it; a volume the camera stands in covers the view.
++            float box[4] = {1.f, 1.f, 0.f, 0.f};
++            for (unsigned k = 0; k < fires.count; ++k) {
++                const float* a = fires.a[k];
++                const float* b = fires.b[k];
++                const float height = std::sqrt(b[0] * b[0] + b[1] * b[1] + b[2] * b[2]);
++                if (!(height >= 1.f)) continue;
++                const float plume = b[3] < 0.5f && fires.smoke > 0.5f ? 3.2f : 1.f + 0.6f * fires.c[k][2] * fires.smoke;
++                const float top = height * plume, reach = top * 0.5f + a[3] * (1.f + 0.9f * (plume - 1.f));
++                const float c[3] = {a[0] + b[0] / height * top * 0.5f, a[1] + b[1] / height * top * 0.5f, a[2] + b[2] / height * top * 0.5f};
++                const float depth = -c[2];
++                if (!(depth - reach > 1.f)) { box[0] = box[1] = 0.f; box[2] = box[3] = 1.f; break; }
++                const float sx = (projection.p0 * c[0] / depth - projection.p8) * 0.5f + 0.5f;
++                const float sy = (projection.p5 * c[1] / depth - projection.p9) * 0.5f + 0.5f;
++                const float rx = std::abs(projection.p0) * reach / (depth - reach) * 0.5f;
++                const float ry = std::abs(projection.p5) * reach / (depth - reach) * 0.5f;
++                box[0] = (std::min)(box[0], sx - rx); box[1] = (std::min)(box[1], sy - ry);
++                box[2] = (std::max)(box[2], sx + rx); box[3] = (std::max)(box[3], sy + ry);
++            }
++            box[0] = std::clamp(box[0], 0.f, 1.f); box[1] = std::clamp(box[1], 0.f, 1.f);
++            box[2] = std::clamp(box[2], 0.f, 1.f); box[3] = std::clamp(box[3], 0.f, 1.f);
++            if (box[2] > box[0] && box[3] > box[1]) {
++                const auto& u = viewUniforms[contextIndex][programFire];
++                g.activeTexture(glc::texture0 + heldNoiseUnit);
++                noiseTouched = true;
++                g.bindTexture(texture3D, r.heldNoise);
++                g.activeTexture(glc::texture1);
++                g.bindTexture(GL_TEXTURE_2D, r.viewDepth);
++                g.activeTexture(glc::texture0);
++                g.bindTexture(GL_TEXTURE_2D, source);
++                g.bindFramebuffer(glc::framebuffer, r.woundFbo);
++                g.framebufferTexture2D(glc::framebuffer, glc::colorAttachment0, GL_TEXTURE_2D, source, 0);
++                setViewport(g, 0, 0, viewport[2], viewport[3]);
++                glDisable(GL_BLEND);
++                g.useProgram(r.fireProgram);
++                setViewUniforms(g, u, frame);
++                g.uniform1i(u.at[uFireNoise], GLint(heldNoiseUnit));
++                g.uniform1f(u.at[uFireCount], float(fires.count));
++                g.uniform4fv(u.at[uFireA], GLsizei(fires.count), &fires.a[0][0]);
++                g.uniform4fv(u.at[uFireB], GLsizei(fires.count), &fires.b[0][0]);
++                g.uniform4fv(u.at[uFireC], GLsizei(fires.count), &fires.c[0][0]);
++                g.uniform4f(u.at[uFireRect], box[0], box[1], box[2], box[3]);
++                // Seconds, wrapped every 1000 s so the float keeps its precision.
++                g.uniform4f(u.at[uFireLook], float(now % 1000000ull) / 1000.f, fires.steps, fires.smoke, 0.f);
++                g.uniform4f(u.at[uFireRight], fires.right[0], fires.right[1], fires.right[2], 0.f);
++                g.uniform1f(u.at[uFrameOffset], float(frameIndex % 64u));
++                const float quad[8] = {box[0] * 2.f - 1.f, box[1] * 2.f - 1.f, box[2] * 2.f - 1.f, box[1] * 2.f - 1.f,
++                                       box[0] * 2.f - 1.f, box[3] * 2.f - 1.f, box[2] * 2.f - 1.f, box[3] * 2.f - 1.f};
++                g.bindVertexArray(r.woundQuadVao);
++                g.bindBuffer(glc::arrayBuffer, r.woundQuadVbo);
++                g.bufferData(glc::arrayBuffer, ptrdiff_t(sizeof quad), quad, glc::dynamicDraw);
++                g.vertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 8, nullptr);
++                g.enableVertexAttribArray(0);
++                woundTextureBarrier();
++                glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
++                woundTextureBarrier(); // the finishing pass reads what was just written
++                g.bindVertexArray(r.viewVao);
++            }
++        }
+         if (finishMode) {
+             beginPass(true);
+             g.activeTexture(glc::texture1);
+@@ -4206,6 +4381,12 @@ static void presentViewEffects(uintptr_t view, const ViewRequest* eye = nullptr)
+         ViewEffectProjectionSnapshot matrices;
+         if (readViewMatrices(view, matrices)) woundViewUniforms(matrices.view, request.wounds);
+     }
++    // Fire and smoke: desktop and VR eyes alike, like the wounds.
++    if (fireLook.load(std::memory_order_relaxed) > 0.f) {
++        ViewEffectProjectionSnapshot matrices;
++        if (readViewMatrices(view, matrices) && matrices.worldUpValid)
++            fireViewUniforms(matrices.view, viewCpuFrameMs.load(std::memory_order_relaxed), request.fires);
++    }
+     request.conditionStrength = conditionEffects.load(std::memory_order_relaxed);
+     if (request.conditionStrength > 0.f) {
+         readCondition(request);
+diff --git a/src/mod/overlay.inl b/src/mod/overlay.inl
+index 90449d1..95fa5d0 100644
+--- a/src/mod/overlay.inl
++++ b/src/mod/overlay.inl
+@@ -259,7 +259,7 @@ struct CueContext {
+     bool viewApiAttempted = false, viewApiFailed = false, viewTargetsFailed = false;
+     bool aoAttempted = false, ssrAttempted = false, dofAttempted = false, finishAttempted = false,
+          compositeAttempted = false, resolveAttempted = false, dofCompositeAttempted = false,
+-         meterAttempted = false, distanceAttempted = false, woundAttempted = false;
++         meterAttempted = false, distanceAttempted = false, woundAttempted = false, fireAttempted = false;
+     // Occlusion/reflection blending over frames: the camera of the last blended frame.
+     unsigned viewFrame = 1;      // counts blended frames; history written in frame f is usable in f + 1
+     ULONGLONG previousTick = 0;  // when the last blended frame was drawn
+diff --git a/src/mod/session.inl b/src/mod/session.inl
+index da83489..6676778 100644
+--- a/src/mod/session.inl
++++ b/src/mod/session.inl
+@@ -664,6 +664,9 @@ static void writeRunningStatus(FILE* f, const Aim& a) {
+     j.unum("held_objects", heldObjects.load());
+     j.unum("replay_budget_cut", replayBudgetCut.load());
+     j.fixed("level_detail_scale", levelDetailScale.load(std::memory_order_relaxed), 2);
++    j.fixed("fire_volumes", float(fireShown.load(std::memory_order_relaxed)), 0);
++    j.fixed("fire_quality", fireQuality.load(std::memory_order_relaxed), 2);
++    j.fixed("fire_faults", float(fireFaults.load(std::memory_order_relaxed)), 0);
+     j.unum("level_people", levelPeopleSeen.load());
+     j.unum("view_effects_draws", viewEffectsDraws.load());
+     j.unum("view_effects_unavailable", viewEffectsUnavailable.load());
+diff --git a/src/cue_resources.h b/src/cue_resources.h
+index a44ef9f..afa0bea 100644
+--- a/src/cue_resources.h
++++ b/src/cue_resources.h
+@@ -59,6 +59,8 @@ struct CueResources {
+              resolveProgram = 0, dofCompositeProgram = 0, meterProgram = 0, distanceProgram = 0;
+     // Wound marks' own pass (view_effects.inl): program, framebuffer over the image, the box's quad.
+     unsigned woundProgram = 0, woundFbo = 0, woundQuadVao = 0, woundQuadVbo = 0;
++    // Fire and smoke (fire.inl): its program; it draws through the wound pass's framebuffer and quad.
++    unsigned fireProgram = 0;
+     // Ambient occlusion and reflections render at half resolution: [0] occlusion, [1] reflection.
+     unsigned halfFbo[2]{}, halfTex[2]{};
+     // Their blend over frames, same size and lifetime: [effect][ping-pong]. historySlot
+@@ -100,7 +102,7 @@ struct CueResources {
+     bool viewLive() const {
+         return viewVao || viewVbo || viewColor || viewDepth || viewDepthPrevious || offscreenFbo ||
+                offscreenDepthFbo || timerQueries[0][0] ||
+-               timerQueries[1][0] || timerQueries[2][0] || timerQueries[3][0] || aoProgram || ssrProgram || dofProgram || finishProgram || woundProgram || woundFbo || woundQuadVao || woundQuadVbo ||
++               timerQueries[1][0] || timerQueries[2][0] || timerQueries[3][0] || aoProgram || ssrProgram || dofProgram || finishProgram || woundProgram || fireProgram || woundFbo || woundQuadVao || woundQuadVbo ||
+                compositeProgram || resolveProgram || chainTex || chainFbo[0] || chainFbo[1] || dofCompositeProgram || dofFbo || dofTex || distanceProgram || distanceFbo || distanceTex || halfFbo[0] || halfFbo[1] || halfTex[0] || halfTex[1] ||
+                historyFbo[0][0] || historyFbo[0][1] || historyFbo[1][0] || historyFbo[1][1] ||
+                historyTex[0][0] || historyTex[0][1] || historyTex[1][0] || historyTex[1][1] ||
+@@ -245,6 +247,7 @@ struct CueResources {
+         retireProgram(g, meterProgram);
+         retireProgram(g, distanceProgram);
+         retireProgram(g, woundProgram);
++        retireProgram(g, fireProgram);
+         if (woundFbo && g.deleteFramebuffers) g.deleteFramebuffers(1, &woundFbo);
+         if (woundQuadVao) g.deleteVertexArrays(1, &woundQuadVao);
+         if (woundQuadVbo) g.deleteBuffers(1, &woundQuadVbo);
+diff --git a/src/first_person.cpp b/src/first_person.cpp
+index 67487b0..6d2a413 100644
+--- a/src/first_person.cpp
++++ b/src/first_person.cpp
+@@ -107,6 +107,7 @@ static MH_STATUS disableStereoHooks() { return MH_OK; }
+ #include "mod/supersampling.inl"
+ #include "mod/overlay.inl"
+ #include "mod/wounds.inl"
++#include "mod/fire.inl"
+ #include "mod/view_effects.inl"
+ #include "mod/frame.inl"
+ #include "mod/headwear_render.inl"
+diff --git a/src/mod/fire.inl b/src/mod/fire.inl
+new file mode 100644
+index 0000000..fc907db
+--- /dev/null
++++ b/src/mod/fire.inl
+@@ -0,0 +1,217 @@
++// Fire and smoke: volumetric flames with a smoke plume above them, drawn by the view effects' fire pass
++// (view_effects.inl) on the finished world image, depth-tested against it, so they sit in the scene and
++// fade where they meet a wall or the floor. Three sources, all read only:
++// - fires: ScriptRuntime.dll's fire_nodes export (version 1; requested by the Fire mod): every fire
++//   body in the player's sector (braziers, hearths, prop fires the Fire mod lit, flames it attached),
++//   as its scene node and size;
++// - burning people: characters marked "fire.burning" (character_mark_nodes, marks version 1), a flame
++//   column up their body;
++// - a flaming weapon: the player marked "fire.blade", flames along the right-hand weapon's blade
++//   (blade.inl's bladeLine).
++// No native memory is written and no game call is made; a missing export leaves its source unseen.
++#include "../xr/physical_contact.h"
++
++static std::atomic<float> fireLook{1.f};     // strength, 0 off; on by default, no row (auto quality scales it)
++static std::atomic<float> fireQuality{1.f};  // 1 down to 0 as the frame slows (fireQualityNow)
++static std::atomic<unsigned> fireShown{0}, fireFaults{0};
++
++constexpr unsigned fireShownLimit = 12, fireNodeLimit = 64;
++constexpr float fireReachCm = 4000.f;
++// What the fire pass takes: view-space volumes, nearest first.
++struct FireUniforms {
++    unsigned count = 0;
++    float a[fireShownLimit][4]; // base centre; w: radius at the base, cm
++    float b[fireShownLimit][4]; // base to the flame's top (cm); w: kind (0 fire, 1 a burning body, 2 a blade)
++    float c[fireShownLimit][4]; // intensity 0..1, seed, smoke 0..1, unused
++    float right[3]{};           // world +x in view space: a frame fixed to the world for the noise
++    float steps = 0.f;          // march steps per volume (auto quality)
++    float smoke = 0.f;          // 1: smoke plumes drawn
++    bool any() const { return count > 0; }
++};
++
++using FireNodes = int (*)(uintptr_t* nodes, float* sizes, int capacity);
++using FireNodesVersion = uint32_t (*)();
++static std::atomic<FireNodes> fireNodes{nullptr};
++static std::atomic<ULONGLONG> fireNodesProbed{0};
++
++// Looked up again at most every two seconds until found; the module is pinned once found.
++static FireNodes fireNodeExport() {
++    if (auto fn = fireNodes.load(std::memory_order_acquire)) return fn;
++    const ULONGLONG now = GetTickCount64();
++    if (now - fireNodesProbed.load(std::memory_order_relaxed) < 2000) return nullptr;
++    fireNodesProbed.store(now, std::memory_order_relaxed);
++    HMODULE runtime = nullptr;
++    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_PIN, L"ScriptRuntime.dll", &runtime) || !runtime) return nullptr;
++    const auto version = reinterpret_cast<FireNodesVersion>(GetProcAddress(runtime, "fire_nodes_version"));
++    const auto fn = reinterpret_cast<FireNodes>(GetProcAddress(runtime, "fire_nodes"));
++    if (!version || !fn || version() != 1) return nullptr;
++    fireNodes.store(fn, std::memory_order_release);
++    return fn;
++}
++
++static bool bladeLine(uintptr_t weapon, XrVector3f& hilt, XrVector3f& tip, XrVector3f& axis, float& length); // blade.inl
++static bool sectorOriginOf(uintptr_t node, float* origin);                                                    // view_effects.inl
++
++// Steps and smoke for this frame: like level detail, the scale falls from 1 to 0 as the eased frame
++// period grows from 18 to 25 ms and climbs back 2% a frame. At 0 the flames still draw, coarser and
++// without smoke; they never vanish on a slow frame.
++static void fireQualityNow(float period, FireUniforms& out) {
++    const float target = period > 0.f ? 1.f - std::clamp((period - 18.f) / 7.f, 0.f, 1.f) : 1.f;
++    float scale = fireQuality.load(std::memory_order_relaxed);
++    scale = target < scale ? target : (std::min)(target, scale + 0.02f);
++    fireQuality.store(scale, std::memory_order_relaxed);
++    out.steps = std::round(6.f + 12.f * scale);
++    out.smoke = scale > 0.25f ? 1.f : 0.f;
++}
++
++namespace firepass {
++struct Candidate { float base[3], axis[3], radius, intensity, seed, smoke, kind, distanceSq; };
++
++// World point to view space (row-major, row vector times matrix), and a direction (rotation only).
++inline void point(const float* m, const float* p, float* out) {
++    for (int i = 0; i < 3; ++i) out[i] = p[0] * m[i] + p[1] * m[4 + i] + p[2] * m[8 + i] + m[12 + i];
++}
++inline void direction(const float* m, const float* d, float* out) {
++    for (int i = 0; i < 3; ++i) out[i] = d[0] * m[i] + d[1] * m[4 + i] + d[2] * m[8 + i];
++}
++inline float seedOf(uintptr_t key) {
++    uint64_t h = uint64_t(key) * 0x9E3779B97F4A7C15ull;
++    return float((h >> 40) % 1000) * 0.137f;
++}
++
++// Whether the view matrix takes sector-local or global points is not established (view_effects.inl,
++// held items), so both readings of a sector-local point are tried and the one nearer the camera, in
++// front of it, wins.
++inline bool place(const float* view, const float* local, const float* sectorOrigin, float* out, float& distanceSq) {
++    bool found = false;
++    distanceSq = fireReachCm * fireReachCm;
++    for (int candidate = 0; candidate < 2; ++candidate) {
++        float p[3], c[3];
++        for (int k = 0; k < 3; ++k) p[k] = local[k] + (candidate ? sectorOrigin[k] : 0.f);
++        point(view, p, c);
++        const float sq = c[0] * c[0] + c[1] * c[1] + c[2] * c[2];
++        if (std::isfinite(sq) && sq < distanceSq && c[2] < 300.f) { // not well behind the camera (it looks down -z)
++            distanceSq = sq;
++            memcpy(out, c, sizeof c);
++            found = true;
++        }
++        if (!(sectorOrigin[0] || sectorOrigin[1] || sectorOrigin[2])) break;
++    }
++    return found;
++}
++
++inline bool nodeOrigin(uintptr_t node, float* local, float* sectorOrigin) {
++    if (!node || !readable(node, field::sceneNode::renderTransform + 64)) return false;
++    const float* sampled = (const float*)(node + field::sceneNode::renderTransform);
++    for (int i = 0; i < 3; ++i) local[i] = sampled[12 + i];
++    if (!sectorOriginOf(node, sectorOrigin)) memset(sectorOrigin, 0, 12);
++    return std::isfinite(local[0] + local[1] + local[2]);
++}
++} // namespace firepass
++
++// Collects this frame's fire volumes in the space of `view` (the matrices the view was drawn with).
++static void fireViewUniforms(const float* view, float period, FireUniforms& out) {
++    out.count = 0;
++    if (!(fireLook.load(std::memory_order_relaxed) > 0.f)) return;
++    using firepass::Candidate;
++    Candidate found[fireNodeLimit + 24];
++    unsigned n = 0;
++    const float worldUp[3] = {0.f, 1.f, 0.f}, worldRight[3] = {1.f, 0.f, 0.f};
++    float up[3];
++    firepass::direction(view, worldUp, up);
++    firepass::direction(view, worldRight, out.right);
++    __try {
++        // Fires: the node's origin is where the flames stand; the native size scales them (1 is the
++        // game's medium fire).
++        if (const FireNodes fires = fireNodeExport()) {
++            uintptr_t list[fireNodeLimit]{};
++            float sizes[fireNodeLimit]{};
++            const int count = std::clamp(fires(list, sizes, int(fireNodeLimit)), 0, int(fireNodeLimit));
++            for (int i = 0; i < count && n < fireNodeLimit; ++i) {
++                float local[3], origin[3];
++                Candidate c{};
++                if (!firepass::nodeOrigin(list[i], local, origin) || !firepass::place(view, local, origin, c.base, c.distanceSq))
++                    continue;
++                const float size = std::clamp(std::isfinite(sizes[i]) ? sizes[i] : 1.f, 0.2f, 4.f);
++                c.radius = 20.f * size;
++                for (int k = 0; k < 3; ++k) c.axis[k] = up[k] * 70.f * size;
++                c.intensity = 1.f;
++                c.seed = firepass::seedOf(list[i]);
++                c.smoke = 1.f;
++                c.kind = 0.f;
++                found[n++] = c;
++            }
++        }
++        const WoundMarkNodes marks = woundMarkExport();
++        // Burning people: a column from about the knees to over the head around the body's centre.
++        if (marks) {
++            uintptr_t list[32]{};
++            uint32_t values[32]{};
++            const int count = std::clamp(marks("fire.burning", list, values, 32), 0, 32);
++            for (int i = 0; i < count && n < fireNodeLimit + 16; ++i) {
++                float local[3], origin[3];
++                Candidate c{};
++                if (!values[i] || !firepass::nodeOrigin(list[i], local, origin)) continue;
++                for (int k = 0; k < 3; ++k) local[k] -= worldUp[k] * 70.f;
++                if (!firepass::place(view, local, origin, c.base, c.distanceSq)) continue;
++                c.radius = 30.f;
++                for (int k = 0; k < 3; ++k) c.axis[k] = up[k] * 165.f;
++                c.intensity = 0.75f;
++                c.seed = firepass::seedOf(list[i]);
++                c.smoke = 0.6f;
++                c.kind = 1.f;
++                found[n++] = c;
++            }
++        }
++        // A flaming weapon: the player marked "fire.blade"; flames along the primary weapon's blade.
++        if (marks) {
++            uintptr_t list[4]{};
++            uint32_t values[4]{};
++            const int count = std::clamp(marks("fire.blade", list, values, 4), 0, 4);
++            const uintptr_t player = count > 0 && values[0] ? *(const uintptr_t*)gameAt(fp::sig::playerRoot) : 0;
++            const uintptr_t weapon = player && readable(player, field::character::weapons + 8) &&
++                                             *(const int*)(player + field::character::weaponCount) > 0
++                                         ? *(const uintptr_t*)(player + field::character::weapons) : 0;
++            XrVector3f hilt{}, tip{}, axis{};
++            float length = 0.f;
++            if (weapon && readable(weapon, field::bodyPart::meshNode + 8) && bladeLine(weapon, hilt, tip, axis, length)) {
++                const uintptr_t mesh = *(const uintptr_t*)(weapon + field::bodyPart::meshNode);
++                float origin[3]{};
++                if (!mesh || !sectorOriginOf(mesh, origin)) memset(origin, 0, sizeof origin);
++                const float from[3] = {hilt.x, hilt.y, hilt.z};
++                Candidate c{};
++                if (n < fireNodeLimit + 24 && firepass::place(view, from, origin, c.base, c.distanceSq)) {
++                    const float along[3] = {tip.x - hilt.x, tip.y - hilt.y, tip.z - hilt.z};
++                    firepass::direction(view, along, c.axis);
++                    c.radius = 6.f;
++                    c.intensity = 0.9f;
++                    c.seed = firepass::seedOf(weapon);
++                    c.smoke = 0.25f;
++                    c.kind = 2.f;
++                    found[n++] = c;
++                }
++            }
++        }
++    } __except (EXCEPTION_EXECUTE_HANDLER) {
++        fireFaults.fetch_add(1, std::memory_order_relaxed);
++    }
++    const unsigned count = (std::min)(n, fireShownLimit);
++    std::partial_sort(found, found + count, found + n,
++                      [](const Candidate& x, const Candidate& y) { return x.distanceSq < y.distanceSq; });
++    for (unsigned i = 0; i < count; ++i) {
++        const Candidate& c = found[i];
++        for (int k = 0; k < 3; ++k) {
++            out.a[i][k] = c.base[k];
++            out.b[i][k] = c.axis[k];
++        }
++        out.a[i][3] = c.radius;
++        out.b[i][3] = c.kind;
++        out.c[i][0] = c.intensity * fireLook.load(std::memory_order_relaxed);
++        out.c[i][1] = c.seed;
++        out.c[i][2] = c.smoke;
++        out.c[i][3] = 0.f;
++    }
++    out.count = count;
++    fireShown.store(count, std::memory_order_relaxed);
++    if (count) fireQualityNow(period, out);
++}

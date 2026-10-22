@@ -17,6 +17,7 @@ do without.
 | 7 | `world.nearby` prefix match, or more names a call | one scan instead of 12 | the 753-name catalogue is read 64 names a callback |
 | 8 | Energy casts the game does not know go to `power.cast` | Fire Breath and Flaming Weapon can be cast at all | the game plays its fail sound |
 | 9 | `levels.read(member, package)` | Energy School builds its page from the installed one (ships no game data) | the Energy page stays as installed: the powers cannot be learnt |
+| 10 | native export `fire_nodes` | ExCamera's volumetric flames and smoke on every fire (excamera/fire-01.patch) | ExCamera draws flames only on burning people and the flaming blade (marks) |
 
 ## 1. `world.light_fire(name, {position, size})`, `world.put_out_fire(name)`
 
@@ -138,3 +139,19 @@ do without.
   School serves them from its first `menu` or `session` callback; if the game reads them earlier (at
   startup) and keeps them, the serve has to be in place before that, and `levels.read` would be needed
   while loading.
+
+## 10. Native export `fire_nodes` (for ExCamera's fire pass)
+
+- **Why:** ExCamera's fire pass (`excamera/fire-01.patch`) draws volumetric flames and smoke at every
+  fire. Burning people and the flaming blade come from marks it already reads; fires themselves
+  (braziers, hearths, prop fires from request 1, flames from request 3) need a list, and the runtime
+  already tracks fire bodies (the 0.21 identity registry, request 2).
+- **Ask:** two exports beside `character_mark_nodes`, same rules (any thread, no lock, no game memory
+  read or allocation in the call, refreshed at each pulse, so a node may be one pulse stale):
+  - `uint32_t fire_nodes_version()` returning 1;
+  - `int fire_nodes(uintptr_t* nodes, float* sizes, int capacity)`: each live fire body in the player's
+    sector (controller tag `0x3DD0E002`, or a fire an addon lit or attached even after its tag was
+    cleared), its scene node and its size (controller `+0x12C`, which `F2A70` writes with the size),
+    nearest the player first; returns how many it wrote (at most `capacity`, 64).
+- **ExCamera:** reads each node's sampled transform (`+0xA0`, translation) and its sector's origin, as
+  it does for held items; nothing else.

@@ -19,7 +19,7 @@ local undead_roles = { Undead = true, Corpse = true }
 local serial = 0
 local warned = {}
 local marks = {}            -- mark target ("player" or a record id) -> {burning, scorch, sent_burning, sent_scorch}
-local MARK_TARGETS = 16     -- the runtime keeps 32 marks an addon: two names each
+local MARK_TARGETS = 15     -- the runtime keeps 32 marks an addon: two names each, and main.lua's "fire.blade"
 
 local function warn_once(what, text)
     if not warned[what] then

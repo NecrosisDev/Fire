@@ -29,6 +29,7 @@ local orders = {}           -- ignitions asked for by messages and hits, applied
 local sound_due = false
 local held_flame = nil      -- what the player holds burning: config.torch, config.candle or nil
 local held_ids = {}         -- the player's held item ids, from the last inventory read
+local blade_sent = 0        -- the "fire.blade" mark last set on the player (ExCamera draws the flaming blade)
 
 local function distance(a, b)
     local dx, dy, dz = a[1] - b[1], a[2] - b[2], a[3] - b[3]
@@ -352,6 +353,14 @@ local function tick()
     if people.marks_due() then
         timers.after(0, people.flush_marks)
     end
+    local blade = weapon_burning(now) and 1 or 0
+    if blade ~= blade_sent and characters and characters.set_mark and api.has_capability("characters.marks") then
+        timers.after(0, function()
+            if pcall(characters.set_mark, "player", config.marks.blade, blade) then
+                blade_sent = blade
+            end
+        end)
+    end
     timers.after(0, function() people.flush_glow(here) end)
     if heard(caught, here) then
         sound_due = true
@@ -392,7 +401,7 @@ events.on("runtime.phase", function(event)
     stop()
     props.reset()
     people.reset()
-    orders, weapon_until, last_tick, held_flame, level_id = {}, 0, nil, nil, nil
+    orders, weapon_until, last_tick, held_flame, level_id, blade_sent = {}, 0, nil, nil, nil, 0
     if event.phase == "session" then
         tick_timer = timers.every(config.tick, tick)
         scan_timer = timers.every(config.scan.hot, scan)
