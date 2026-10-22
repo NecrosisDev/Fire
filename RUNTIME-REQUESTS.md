@@ -1,5 +1,12 @@
 # Runtime requests from Fire (and Energy School)
 
+**Landed (2026-10-22, runtime 0.28.0-r44/r47/r48):** #1 `world.light_fire`/`put_out_fire`, #2 `world.fires`,
+#3 `effects.attach_fire` (characters and, in the source, `"weapon:right"`/`"weapon:left"`; API.md's row still
+says weapons are not supported), #6 as `held`/`held_lit` on character rows and `weapon_lit` on hits (no
+`weapon_record`: an instanced torch's `weapon_id` is not its record), #8 Energy casts, #9 `levels.read`,
+#10 `fire_nodes`. Still open: #4 the fire jet, #5 `facing`, #7 `world.nearby` prefixes, and
+`weapon_record` on hits.
+
 Static reading of Exanima.exe 0.9.5.2g (addresses are RVAs; sources: KNOWLEDGEBASE.md "What lights a
 fire", "Fire does not hurt by itself", "Particle emitters through CFD20", and API.md 0.21/0.22 and
 `gear.use`). Nothing here has run in game. Fire and Energy School already call each of these behind

@@ -45,6 +45,29 @@ local function flame_of(record)
     return nil
 end
 
+-- What a character's hands hold burning, from its snapshot row (runtime 0.28.0-r47: `held` record ids and
+-- `held_lit`, whether a fire burns on it): a torch or candle unless the runtime says it is out, and anything
+-- else the runtime says burns (a weapon with a flame attached) counts as a torch. Nil when the row says nothing.
+local function row_flame(row)
+    if not row.held then
+        return nil
+    end
+    local best
+    for _, hand in ipairs({ "right", "left" }) do
+        local lit = row.held_lit and row.held_lit[hand]
+        local flame = flame_of(row.held[hand])
+        if lit == false then
+            flame = nil
+        elseif lit == true and not flame then
+            flame = config.torch
+        end
+        if flame and (not best or flame.heat > best.heat) then
+            best = flame
+        end
+    end
+    return best or false
+end
+
 -- The player's held torch or candle, from the inventory (weapon slots of the active set).
 local function read_held()
     held_flame, held_ids = nil, {}
@@ -167,8 +190,14 @@ if api.has_capability("events.combat") then
             orders[#orders + 1] = { victim = victim, seconds = config.weapon.hit_seconds }
             return
         end
+        -- weapon_lit (0.28.0-r47): a fire burns on the weapon. A torch or candle record counts unless it says not.
         local flame = flame_of(event.weapon_record or event.weapon_id)
-        if flame and event.weapon_lit ~= false and math.random() < flame.hit_chance then
+        if event.weapon_lit == false then
+            flame = nil
+        elseif event.weapon_lit == true and not flame then
+            flame = config.torch
+        end
+        if flame and math.random() < flame.hit_chance then
             orders[#orders + 1] = { victim = victim, seconds = flame.hit_seconds }
         end
     end)
@@ -286,7 +315,13 @@ local function tick()
     last_tick = now
     local rows, me = read_characters()
     local here = me and me.position
-    read_held()
+    -- The player's own row says what burns in their hands where the runtime reports it; else the inventory.
+    local mine = me and row_flame(me)
+    if mine == nil then
+        read_held()
+    else
+        held_flame = mine or nil
+    end
 
     -- What gives off heat for props: held flames, burning people (burning props add their own).
     local sources = {}
@@ -302,7 +337,7 @@ local function tick()
     -- NPCs' held torches, where the runtime reports what they hold (requested).
     for _, row in ipairs(rows) do
         if row.held and row.position and not row.is_player and not row.dead then
-            local flame = flame_of(row.held.right) or flame_of(row.held.left)
+            local flame = row_flame(row)
             if flame then
                 sources[#sources + 1] = { position = row.position, heat = flame.heat, reach = flame.reach }
             end

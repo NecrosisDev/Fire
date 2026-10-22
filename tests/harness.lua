@@ -43,6 +43,7 @@ local function new(opts)
         local out = {}
         for _, r in ipairs(s.rows) do
             local row = { handle = r.handle, record_id = r.record_id, is_player = r.is_player, dead = r.dead, down = r.down,
+                          held = r.held, held_lit = r.held_lit,
                           position = { r.position[1], r.position[2], r.position[3] }, roles = o and o.details and r.roles or nil }
             if not r.is_player then
                 row.damage = function(self, spec) staged()
@@ -295,6 +296,23 @@ case("a flaming weapon marks the player for ExCamera's blade flames, and clears 
     local s = new() s.session() s.send("fire.weapon", { seconds = 3 }) s.run(1)
     assert(s.marks["player:fire.blade"] == 1)
     s.run(3) assert(s.marks["player:fire.blade"] == nil)
+end)
+
+case("hands the runtime reports: a lit torch heats props, an NPC's burning sword ignites on a hit, an unlit torch does not", function()
+    local s = new()
+    s.player.held, s.player.held_lit = { right = 0x1F }, { right = true }
+    s.props = { { name = "sack a", position = { 50, 0, 0 } } }
+    s.rows[2] = { handle = 7, position = { 3000, 0, 0 }, held = { right = 0x1F }, held_lit = { right = false } }
+    s.session() s.run(4)
+    assert(count(s.fires_lit) == 1, "the player's lit torch")
+    s.hit({ source = "weapon", handle = 1, is_player = true, weapon_id = 0x9999, weapon_lit = true, attacker = { is_player = false } })
+    s.hit({ source = "weapon", handle = 1, is_player = true, weapon_id = 0x1F, weapon_lit = false, attacker = { is_player = false } })
+    s.run(2)
+    assert(#s.player_damage > 0, "a burning blade ignites")
+    local t = new()
+    t.player.held, t.player.held_lit = { right = 0x1F }, { right = false }
+    t.props = { { name = "sack a", position = { 50, 0, 0 } } }
+    t.session() t.run(4) assert(count(t.fires_lit) == 0, "an unlit torch heats nothing")
 end)
 
 case("each burn tick tells Injuries what it dealt, NPC by handle and the player", function()
