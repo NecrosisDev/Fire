@@ -14,8 +14,6 @@ from collections import Counter
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_GAME = Path('D:/SteamLibrary/steamapps/common/Exanima')
-DEFAULT_EXANIMATE = Path(r'C:\Users\hunte\Documents\ChatGPT\Exanimate\work\r20-pose-studio-codex-20261020\service')
 
 # First matching rule wins. Not flammable: metal, stone, glass and pottery sets, and fixed architecture.
 NOT = ('brass', 'rusty', 'ir_', 'iron', 'mrb', 'marble', 'stn', 'stone', 'glass', 'braz', 'brat5', 'tin',
@@ -92,9 +90,11 @@ def lua_string(text: str) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument('--game', type=Path, default=DEFAULT_GAME)
+    parser.add_argument('--game', type=Path, default=os.environ.get('EXANIMA_DIR'), required=not os.environ.get('EXANIMA_DIR'),
+                        help='the Exanima folder (or set EXANIMA_DIR)')
     parser.add_argument('--exanimate', type=Path,
-                        default=Path(os.environ.get('EXANIMATE_SERVICE', DEFAULT_EXANIMATE)))
+                        default=os.environ.get('EXANIMATE_SERVICE'),
+                        required=not os.environ.get('EXANIMATE_SERVICE'), help='the ExaniMate service folder (or set EXANIMATE_SERVICE)')
     args = parser.parse_args()
     counts = level_names(args.game, args.exanimate)
     rows = [(name, classify(name), n) for name, n in counts.most_common()]
