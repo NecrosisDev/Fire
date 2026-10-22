@@ -2,3 +2,13 @@ __pycache__/
 *.pyc
 .claude/
 /dist/
+
+# Kept on disk, not published: development notes, tests and tools that do not build the mod
+/RUNTIME-REQUESTS.md
+/test_fire.py
+/tests/
+/excamera/BURN-MARKS.md
+/excamera/FIRE-PASS.md
+/excamera/apply_fire.py
+/excamera/fire.inl
+/excamera/fire_shader.glsl
